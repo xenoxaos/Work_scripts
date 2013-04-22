@@ -1,3 +1,8 @@
+#adapted from imap_upload http://sourceforge.net/projects/imap-upload/
+#
+
+
+
 import codecs
 import email
 import email.header
