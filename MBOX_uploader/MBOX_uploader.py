@@ -1,8 +1,3 @@
-#adapted from imap_upload http://sourceforge.net/projects/imap-upload/
-#
-
-
-
 import codecs
 import email
 import email.header
@@ -30,17 +25,19 @@ if sys.version_info < (2, 5):
 
 class MyOptionParser(OptionParser):
     def __init__(self):
-        usage = "usage: python %prog [options] MBOX [DEST]\n"\
-                "  MBOX UNIX style mbox file.\n"\
-                "  DEST is imap[s]://[USER[:PASSWORD]@]HOST[:PORT][/BOX]\n"\
-                "  DEST has a priority over the options."
+        usage = "usage: python %prog [options]\n"\
+                "  Utility to upload multiple Thunderbird/*nix style MBOX files\n"\
         OptionParser.__init__(self, usage,
                               version="UDel MBOX Uploader " + __version__)
         self.add_option("--user", help="login name [default: empty]")
         self.add_option("--password", help="login password")
+        self.add_option("--logfile", help="Logfile name (w/o extension)")
+        self.add_option("--path", help="Path to MBOX files [default: ./mbox")
         self.set_defaults(user = "",
-                         password = "")
-        
+                         password = "",
+                         logfile = "MBOX_log.txt",
+                         path = "./mbox")
+
 
 
     def parse_args(self, args):
@@ -52,7 +49,7 @@ class MyOptionParser(OptionParser):
         raise optparse.OptParseError(self.get_usage() + "\n" + msg)
 
 
-def si_prefix(n, prefixes=("", "k", "M", "G", "T", "P", "E", "Z", "Y"), 
+def si_prefix(n, prefixes=("", "k", "M", "G", "T", "P", "E", "Z", "Y"),
               block=1024, threshold=1):
     """Get SI prefix and reduced number."""
     if (n < block * threshold or len(prefixes) == 1):
@@ -99,13 +96,15 @@ class Progress():
         self.format = "%" + str(len(str(total_count))) + "d/" + \
                       str(total_count) + " %5.1f %-2s  %s  "
 
-    def begin(self, msg):
+    def begin(self, msg, f):
         """Called when start proccessing of a new message."""
         self.time_began = time.time()
         size, prefix = si_prefix(float(len(msg.as_string())), threshold=0.8)
         sbj = self.decode_subject(msg["subject"] or "")
         print >>sys.stderr, self.format % \
               (self.count + 1, size, prefix + "B", left_fit_width(sbj, 30)),
+        print >>f, self.format % \
+              (self.count + 1, size, prefix + "B", left_fit_width(sbj, 80)),
 
     def decode_subject(self, sbj):
         decoded = []
@@ -117,43 +116,50 @@ class Progress():
             pass
         return "".join(decoded)
 
-    def endOk(self):
+    def endOk(self, f):
         """Called when a message was processed successfully."""
         self.count += 1
         self.ok_count += 1
         print >>sys.stderr, "OK (%d sec)" % \
               math.ceil(time.time() - self.time_began)
+        print >>f, "Email uploaded (%d sec)" % \
+              math.ceil(time.time() - self.time_began)
 
-    def endNg(self, err):
+    def endNg(self, err, f):
         """Called when an error has occurred while processing a message."""
-        print >>sys.stderr, "NG (%s)" % err
 
-    def endAll(self):
+        print >>sys.stderr, "NG (%s)" % err
+        print >>f, "Email failed to upload: (%s)" % err
+
+    def endAll(self, f):
         """Called when all message was processed."""
         print >>sys.stderr, "Done. (OK: %d, NG: %d)" % \
               (self.ok_count, self.total_count - self.ok_count)
+        print >>f, "\nCurrent MBOX File Complete. Uploaded OK: %d, Upload Failed: %d)" % \
+              (self.ok_count, self.total_count - self.ok_count)
 
 
-def upload(imap, src, err, time_fields):
+
+def upload(imap, src, err, time_fields, f):
     print >>sys.stderr, \
           "Counting the mailbox (it could take a while for the large one)."
     p = Progress(len(src))
     for i, msg in src.iteritems():
         try:
-            p.begin(msg)
-            r, r2 = imap.upload(msg.get_delivery_time(time_fields), 
+            p.begin(msg, f)
+            r, r2 = imap.upload(msg.get_delivery_time(time_fields),
                                 msg.as_string(), 3)
             if r != "OK":
-                raise Exception(r2[0]) # FIXME: Should use custom class
-            p.endOk()
+                raise Exception(r2[0])
+            p.endOk(f)
             continue
         except socket.error, e:
-            p.endNg("Socket error: " + str(e))
+            p.endNg("Socket error: " + str(e), f)
         except Exception, e:
-            p.endNg(e)
+            p.endNg(e, f)
         if err is not None:
             err.add(msg)
-    p.endAll()
+    p.endAll(f)
 
 
 def get_delivery_time(self, fields):
@@ -164,14 +170,14 @@ def get_delivery_time(self, fields):
       * "from"      From_ line of mbox format.
       * "received"  The first "Received:" field in RFC 2822.
       * "date"      "Date:" field in RFC 2822.
-    Return the current time if the fields is empty or no field 
+    Return the current time if the fields is empty or no field
     had valid value.
     """
     def get_from_time(self):
         """Extract the time from From_ line."""
         time_str = self.get_from().split(" ", 1)[1]
         t = time_str.replace(",", " ").lower()
-        t = re.sub(" (sun|mon|tue|wed|thu|fri|sat) ", " ", 
+        t = re.sub(" (sun|mon|tue|wed|thu|fri|sat) ", " ",
                    " " + t + " ")
         if t.find(":") == -1:
             t += " 00:00:00"
@@ -191,9 +197,9 @@ def get_delivery_time(self, fields):
             t = vars()["get_" + field + "_time"](self)
             t = email.utils.parsedate_tz(t)
             t = email.utils.mktime_tz(t)
-            # Do not allow the time before 1970-01-01 because 
-            # some IMAP server (i.e. Gmail) ignore it, and 
-            # some MUA (Outlook Express?) set From_ date to 
+            # Do not allow the time before 1970-01-01 because
+            # some IMAP server (i.e. Gmail) ignore it, and
+            # some MUA (Outlook Express?) set From_ date to
             # 1965-01-01 for all messages.
             if t < 0:
                 continue
@@ -204,8 +210,8 @@ def get_delivery_time(self, fields):
     return time.time()
 
 # Directly attach get_delivery_time() to the mailbox.mboxMessage
-# as a method. 
-# I want to use the factory parameter of mailbox.mbox() 
+# as a method.
+# I want to use the factory parameter of mailbox.mbox()
 # but it seems not to work in Python 2.5.4.
 mailbox.mboxMessage.get_delivery_time = get_delivery_time
 
@@ -221,7 +227,7 @@ class IMAPUploader:
         self.password = password
         self.retry = 3
 
-        
+
 
     def upload(self, delivery_time, message, retry = None):
         if retry is None:
@@ -242,10 +248,10 @@ class IMAPUploader:
         print >>sys.stderr, "(Reconnect)",
         time.sleep(5)
         return self.upload(delivery_time, message, retry - 1)
-        
+
     def change_mailbox(self, mboxfile):
         self.box = mboxfile
-        
+
     def open(self):
         if self.imap:
             return
@@ -264,7 +270,7 @@ class IMAPUploader:
 def main(args=None):
     try:
         # Setup locale
-        # Set LC_TIME to "C" so that imaplib.Time2Internaldate() 
+        # Set LC_TIME to "C" so that imaplib.Time2Internaldate()
         # uses English month name.
         locale.setlocale(locale.LC_ALL, "")
         locale.setlocale(locale.LC_TIME, "C")
@@ -283,26 +289,52 @@ def main(args=None):
         if len(str(options.password)) == 0:
             options.password = getpass.getpass()
         #options = options.__dict__
-        sourcedir = "."
-        
-        err = ""
+        sourcedir = options.path
+        logname = options.logfile +".txt"
+        logfile = open(logname, 'w')
+        err = logfile + "_failed_messages.mbox"
         usern = options.user
         passwordn = options.password
         time_fields=["from", "received", "date"]
         # Connect to the server and login
         print >>sys.stderr, \
-              "Connecting to IMAP Server."
+              "Connecting to IMAP Server as %s" % usern
+        print >>logfile,'Connecting to IMAP Server as %s'% usern
 
         uploader = IMAPUploader(usern, passwordn)
         uploader.open()
-        for files in os.listdir(sourcedir):
-            uploader.change_mailbox(files)
-            src = mailbox.mbox(files, create=False)
-            if err:
-                err = mailbox.mbox(err)
-            # Upload
-            print >>sys.stderr, "Uploading..." + files
-            upload(uploader, src, err, time_fields)
+        totalMessages = 0
+        totalMBOXFiles = 0
+        print >>logfile, "List of MBOX files and message Counts:"
+        for r,d,files in os.walk(sourcedir):
+            for file in files:
+                totalMBOXFiles +=1
+                thisMBOXMessages = 0
+                sourcefile = os.path.join(r,file)
+                mboxfile = mailbox.mbox(sourcefile, create=False)
+                for message in mboxfile:
+                    totalMessages +=1
+                    thisMBOXMessages +=1
+                print >>logfile, 'MBOX: %s %d'% (left_fit_width(file + ":",80, ' '), thisMBOXMessages)
+        print >>logfile, "\n"
+        print >>logfile, 'Total MBOX Files: %d'% totalMBOXFiles
+        print >>logfile, 'Total Messages: %d'% totalMessages
+        print >>logfile, "\n"
+
+
+        for r,d,files in os.walk(sourcedir):
+            for file in files:
+                uploader.change_mailbox(file)
+                print "mailboxname:" + file
+                sourcefile = os.path.join(r,file)
+                src = mailbox.mbox(sourcefile, create=False)
+                if err:
+                    err = mailbox.mbox(err)
+                # Upload
+                print >>logfile, "Uploading messages in file %s\n"% file
+                print >>sys.stderr, "Uploading..." + file
+                upload(uploader, src, err, time_fields, logfile)
+                print >>logfile, "\n"
         return 0
     except optparse.OptParseError, e:
         print >>sys.stderr, e
